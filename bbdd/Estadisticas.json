@@ -1,0 +1,126 @@
+{
+  "Bons Aires, Palma De Mallorca": {
+    "1": {
+      "precio": {
+        "media": 675000,
+        "mediana": 675000,
+        "moda": 675000
+      },
+      "metros": {
+        "media": 92,
+        "mediana": 92,
+        "moda": 92
+      }
+    },
+    "2": {
+      "precio": {
+        "media": 685000,
+        "mediana": 685000,
+        "moda": 495000
+      },
+      "metros": {
+        "media": 110,
+        "mediana": 110,
+        "moda": 81
+      }
+    },
+    "3": {
+      "precio": {
+        "media": 1063333,
+        "mediana": 740000,
+        "moda": 450000
+      },
+      "metros": {
+        "media": 153,
+        "mediana": 137,
+        "moda": 116
+      }
+    },
+    "4": {
+      "precio": {
+        "media": 750000,
+        "mediana": 750000,
+        "moda": 750000
+      },
+      "metros": {
+        "media": 174,
+        "mediana": 174,
+        "moda": 174
+      }
+    },
+    "5": {
+      "precio": {
+        "media": 955000,
+        "mediana": 1075000,
+        "moda": 1150000
+      },
+      "metros": {
+        "media": 216,
+        "mediana": 227,
+        "moda": 250
+      }
+    }
+  },
+  "Palma De Mallorca": {
+    "1": {
+      "precio": {
+        "media": 457000,
+        "mediana": 457000,
+        "moda": 239000
+      },
+      "metros": {
+        "media": 76,
+        "mediana": 76,
+        "moda": 60
+      }
+    },
+    "2": {
+      "precio": {
+        "media": 626000,
+        "mediana": 695000,
+        "moda": 695000
+      },
+      "metros": {
+        "media": 116,
+        "mediana": 130,
+        "moda": 130
+      }
+    },
+    "3": {
+      "precio": {
+        "media": 548481,
+        "mediana": 499000,
+        "moda": 670000
+      },
+      "metros": {
+        "media": 122,
+        "mediana": 120,
+        "moda": 91
+      }
+    },
+    "4": {
+      "precio": {
+        "media": 594824,
+        "mediana": 520000,
+        "moda": 425000
+      },
+      "metros": {
+        "media": 149,
+        "mediana": 146,
+        "moda": 102
+      }
+    },
+    "5": {
+      "precio": {
+        "media": 1076556,
+        "mediana": 1174000,
+        "moda": 1250000
+      },
+      "metros": {
+        "media": 213,
+        "mediana": 215,
+        "moda": 211
+      }
+    }
+  }
+}
