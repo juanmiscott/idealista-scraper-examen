@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { ChromaClient } from "chromadb"
 import neo4j from "neo4j-driver";
-import dotenv from "dotenv";
+import dotenv from "dotenv"
 
 dotenv.config();
 
@@ -19,75 +19,44 @@ const CHROMA_HOST = process.env.CHROMA_HOST || "localhost";
 const CHROMA_PORT = process.env.CHROMA_PORT || 8000;
 const COLLECTION_NAME = "inmuebles_idealista";
 
-
-
 let neo4jDriver = null;
 let neo4jSession = null;
 let chromaClient = null;
 let chromaCollection = null;
 
 // =========================================
-// 🔌 INICIALIZAR CONEXIONES (ARREGLADO)
+// 🔌 INICIALIZAR CONEXIONES
 // =========================================
 async function initConnections() {
-
   if (neo4jDriver && neo4jSession && chromaClient && chromaCollection) {
     return;
   }
 
   console.log("🔌 Inicializando conexiones...\n");
 
-  // ===============================
-  // NEO4J
-  // ===============================
+  // Neo4j
   try {
-    neo4jDriver = neo4j.driver(
-      NEO4J_URI,
-      neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD)
-    );
-
+    neo4jDriver = neo4j.driver(NEO4J_URI, neo4j.auth.basic(NEO4J_USER, NEO4J_PASSWORD));
     await neo4jDriver.verifyConnectivity();
     neo4jSession = neo4jDriver.session({ database: NEO4J_DATABASE });
-
     console.log("✅ Neo4j conectado");
   } catch (err) {
     console.error("❌ Error conectando a Neo4j:", err.message);
     process.exit(1);
   }
 
-  // ===============================
-  // CHROMADB + EMBEDDER OPENAI
-  // ===============================
+  // ChromaDB
   try {
-    chromaClient = new ChromaClient({
-      path: `http://${CHROMA_HOST}:${CHROMA_PORT}`
-    });
-
+    chromaClient = new ChromaClient({ path: `http://${CHROMA_HOST}:${CHROMA_PORT}` });
     await chromaClient.heartbeat();
 
-    // 👉 Embeddings con OpenAI
-    const embedder = async (texts) => {
-      const resp = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: texts,
-      });
-      return resp.data.map(e => e.embedding);
-    };
-
     try {
-chromaCollection = await chromaClient.getCollection({
-  name: COLLECTION_NAME
-});
-
+      chromaCollection = await chromaClient.getCollection({ name: COLLECTION_NAME });
     } catch {
-chromaCollection = await chromaClient.createCollection({
-  name: COLLECTION_NAME
-});
-
+      chromaCollection = await chromaClient.createCollection({ name: COLLECTION_NAME });
     }
 
     console.log("✅ ChromaDB conectado");
-
   } catch (err) {
     console.error("❌ Error conectando a ChromaDB:", err.message);
     console.log("💡 Ejecuta: chroma run --path ./chroma_data");
@@ -98,29 +67,33 @@ chromaCollection = await chromaClient.createCollection({
 }
 
 // ===============================
-// 🧠 ANALIZAR INTENCIÓN CON OPENAI
+// 🧠 ANALIZAR INTENCIÓN MEJORADO
 // ===============================
 async function analizarIntencion(consultaUsuario) {
-  const prompt = `Eres un asistente experto en análisis de consultas inmobiliarias sobre INMUEBLES EN VENTA en España.
+  const prompt = `Eres un asistente experto en análisis de consultas inmobiliarias.
 
 IMPORTANTE:
-- Si el usuario da un precio menor de 10.000 €, IGNÓRALO porque claramente se refiere a alquiler.
-- Todos los precios deben interpretarse como precio de VENTA.
-- Si no menciona precio, déjalo como null.
-- No inventes zonas.
+- Extrae SOLO características que existan en esta lista: "ascensor", "terraza", "balcon", "garaje", "parking", "piscina", "aire_acondicionado", "calefaccion", "amueblado", "trastero", "jardin"
+- Si mencionan "luminoso", "exterior", "reformado", "planta baja": NO las pongas en caracteristicas_obligatorias, ponlas en descripcion_semantica
+- Las zonas deben ser nombres reales de barrios/ciudades en España
+- Si no se menciona precio, usa null
 
-Devuelve SOLO un JSON válido así:
+Devuelve SOLO un JSON válido:
 
 {
   "precio_maximo": number | null,
   "precio_minimo": number | null,
   "habitaciones_minimas": number | null,
-  "caracteristicas_obligatorias": array,
+  "habitaciones_maximas": number | null,
+  "metros_minimos": number | null,
+  "caracteristicas_obligatorias": array (solo características físicas verificables),
+  "caracteristicas_deseadas": array,
   "zonas_preferidas": array,
-  "descripcion_semantica": string
+  "tipo_vivienda": string | null,
+  "descripcion_semantica": string (incluye aspectos subjetivos como luminoso, reformado, tranquilo, planta baja, exterior)
 }
 
-Consulta del usuario: "${consultaUsuario}"`;
+Consulta: "${consultaUsuario}"`;
 
   try {
     const response = await openai.chat.completions.create({
@@ -128,70 +101,63 @@ Consulta del usuario: "${consultaUsuario}"`;
       messages: [{ role: "user", content: prompt }],
       temperature: 0.1,
       max_tokens: 500
-    })
+    });
     
-    const content = response.choices[0].message.content.trim()
-    const jsonText = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const intencion = JSON.parse(jsonText)
+    const content = response.choices[0].message.content.trim();
+    const jsonText = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const intencion = JSON.parse(jsonText);
     
-    return intencion
+    return intencion;
   } catch (error) {
-    console.error("❌ Error analizando intención:", error.message)
-    return null
+    console.error("❌ Error analizando intención:", error.message);
+    return null;
   }
 }
 
 // ===============================
-// 🔍 BÚSQUEDA SEMÁNTICA (CHROMADB)
+// 🔍 BÚSQUEDA SEMÁNTICA MEJORADA
 // ===============================
-async function busquedaSemantica(intencion, limite = 20) {
-  console.log("\n🔍 Ejecutando búsqueda semántica en ChromaDB...")
+async function busquedaSemantica(intencion, limite = 50) {
+  console.log("\n🔍 Ejecutando búsqueda semántica en ChromaDB...");
   
   try {
-    const where = {}
+    // IMPORTANTE: NO usar filtros where aquí, dejar que ChromaDB encuentre lo más similar
+    // Los filtros se aplicarán después en Neo4j
     
-    // Construir filtros
-    if (intencion.precio_maximo) {
-      where.precio = { $lte: intencion.precio_maximo }
-    }
-    if (intencion.habitaciones_minimas) {
-      where.habitaciones = { $gte: intencion.habitaciones_minimas }
-    }
+    const queryText = intencion.descripcion_semantica || "vivienda";
     
-    const queryText = intencion.descripcion_semantica || "vivienda en alquiler"
-    
-   const embedding = await openai.embeddings.create({
-  model: "text-embedding-3-small",
-  input: queryText
-});
+    const embedding = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: queryText
+    });
 
-const results = await chromaCollection.query({
-  queryEmbeddings: [embedding.data[0].embedding],
-  nResults: limite
-});
-
+    const results = await chromaCollection.query({
+      queryEmbeddings: [embedding.data[0].embedding],
+      nResults: limite, // Aumentado para tener más candidatos
+      // NO usar where aquí - deja que la semántica haga su trabajo
+    });
     
     // Convertir a formato unificado
-    const propiedades = []
+    const propiedades = [];
     for (let i = 0; i < results.ids[0].length; i++) {
       propiedades.push({
         id: results.ids[0][i],
         similarity: (1 - results.distances[0][i]) * 100,
         metadata: results.metadatas[0][i]
-      })
+      });
     }
     
-    console.log(`✅ Encontrados ${propiedades.length} resultados semánticos`)
-    return propiedades
+    console.log(`✅ Encontrados ${propiedades.length} candidatos semánticos`);
+    return propiedades;
     
   } catch (error) {
-    console.error("❌ Error en búsqueda semántica:", error.message)
-    return []
+    console.error("❌ Error en búsqueda semántica:", error.message);
+    return [];
   }
 }
 
 // ===============================
-// 🎯 FILTRADO ESTRUCTURADO (NEO4J)
+// 🎯 FILTRADO ESTRUCTURADO FLEXIBLE
 // ===============================
 async function filtradoEstructurado(intencion, idsSemanticos = null) {
   console.log("\n🎯 Ejecutando filtrado estructurado en Neo4j...");
@@ -200,42 +166,41 @@ async function filtradoEstructurado(intencion, idsSemanticos = null) {
     let query = `MATCH (i:Inmueble)`;
     const params = {};
     const conditions = [];
-    
 
-    // -------------------------------
-    // 🔎 Filtro por IDs (búsqueda semántica)
-    // -------------------------------
+    // 🔥 CAMBIO CLAVE: Hacer filtro de IDs OPCIONAL, no obligatorio
     if (idsSemanticos && idsSemanticos.length > 0) {
-      conditions.push(`i.id IN $ids`);
-      params.ids = idsSemanticos;
+      // Solo sugerir estos IDs, pero no restringir a ellos
+      params.ids_sugeridos = idsSemanticos;
     }
 
     // -------------------------------
-    // 💰 Filtros de precio
+    // 💰 Filtros de precio (OBLIGATORIOS si se especifican)
     // -------------------------------
     if (intencion.precio_maximo) {
       conditions.push(`i.precio <= $precio_max`);
       params.precio_max = neo4j.int(intencion.precio_maximo);
     }
+
     if (intencion.precio_minimo) {
       conditions.push(`i.precio >= $precio_min`);
       params.precio_min = neo4j.int(intencion.precio_minimo);
     }
 
     // -------------------------------
-    // 🛏️ Habitaciónes mín/max
+    // 🛏️ Habitaciones (OBLIGATORIOS si se especifican)
     // -------------------------------
     if (intencion.habitaciones_minimas) {
       conditions.push(`i.habitaciones >= $hab_min`);
       params.hab_min = neo4j.int(intencion.habitaciones_minimas);
     }
+
     if (intencion.habitaciones_maximas) {
       conditions.push(`i.habitaciones <= $hab_max`);
       params.hab_max = neo4j.int(intencion.habitaciones_maximas);
     }
 
     // -------------------------------
-    // 📏 Metros mínimos
+    // 📏 Metros
     // -------------------------------
     if (intencion.metros_minimos) {
       conditions.push(`i.metros >= $metros_min`);
@@ -251,97 +216,99 @@ async function filtradoEstructurado(intencion, idsSemanticos = null) {
     }
 
     // -------------------------------
-    // 🔋 Certificado energético
+    // 🟦 Características SOLO si son verificables
     // -------------------------------
-    if (intencion.certificado_energetico && intencion.certificado_energetico.length > 0) {
-      conditions.push(`i.certificado_energetico IN $certificados`);
-      params.certificados = intencion.certificado_energetico;
-    }
+    const caracteristicasValidas = [
+      'ascensor', 'terraza', 'balcon', 'garaje', 'parking', 
+      'piscina', 'aire_acondicionado', 'calefaccion', 'amueblado',
+      'trastero', 'jardin', 'zona_comunitaria', 'cocina_equipada',
+      'armarios_empotrados'
+    ];
 
-    // -------------------------------
-    // 🟩 Aplicar todas las conditions
-    // -------------------------------
-    if (conditions.length > 0) {
-      query += ` WHERE ` + conditions.join(" AND ");
-    }
-
-    // -------------------------------
-    // 🟦 Características obligatorias
-    // -------------------------------
     if (intencion.caracteristicas_obligatorias?.length > 0) {
       for (const carac of intencion.caracteristicas_obligatorias) {
-        query += ` AND EXISTS { MATCH (i)-[:TIENE]->(:Caracteristica {nombre: '${carac}'}) }`;
+        // Solo aplicar si la característica existe en Neo4j
+        if (caracteristicasValidas.includes(carac.toLowerCase())) {
+          conditions.push(`
+            EXISTS {
+              MATCH (i)-[:TIENE]->(:Caracteristica {nombre: '${carac}'})
+            }
+          `);
+        }
       }
     }
 
     // -------------------------------
-    // 🟧 Zonas preferidas — versión correcta
+    // 🟧 Zonas preferidas
     // -------------------------------
-   if (intencion.zonas_preferidas && intencion.zonas_preferidas.length > 0) {
+    if (intencion.zonas_preferidas?.length > 0) {
+      params.zonas = intencion.zonas_preferidas.map(z => z.toLowerCase());
 
-  params.zonas = intencion.zonas_preferidas.map(z => z.toLowerCase());
-
-  const zonaCondition = `
-    EXISTS {
-      MATCH (i)-[:UBICADO_EN]->(z:Zona)
-      WHERE ANY(zp IN $zonas 
-                WHERE toLower(z.nombre) CONTAINS zp
-                   OR toLower(z.nombre) = zp)
+      conditions.push(`
+        EXISTS {
+          MATCH (i)-[:UBICADO_EN]->(z:Zona)
+          WHERE ANY(zp IN $zonas WHERE 
+              toLower(z.nombre) CONTAINS zp 
+              OR toLower(z.nombre) = zp)
+        }
+      `);
     }
-  `;
 
-  if (!query.includes("WHERE")) {
-    query += ` WHERE ${zonaCondition}`;
-  } else {
-    query += ` AND ${zonaCondition}`;
-  }
-}
+    // Aplicar condiciones
+    if (conditions.length > 0) {
+      query += ` WHERE ` + conditions.join(' AND ');
+    }
 
     // -------------------------------
-    // 📤 Resultado final
+    // 📤 Resultado final con scoring
     // -------------------------------
     query += `
       OPTIONAL MATCH (i)-[:UBICADO_EN]->(z:Zona)
       OPTIONAL MATCH (i)-[:TIENE]->(c:Caracteristica)
+      
+      // Calcular score de coincidencia con IDs sugeridos
+      WITH i, z, collect(DISTINCT c.nombre) as caracteristicas,
+           CASE WHEN $ids_sugeridos IS NOT NULL AND i.id IN $ids_sugeridos 
+                THEN 100 
+                ELSE 0 
+           END as bonus_semantico
+      
       RETURN i.id AS id,
              i.precio AS precio,
              i.habitaciones AS habitaciones,
              i.metros AS metros,
              i.tipo_vivienda AS tipo_vivienda,
              i.url AS url,
+             i.planta AS planta,
+             i.luminosidad AS luminosidad,
+             i.exterior_interior AS exterior_interior,
+             i.reforma AS reforma,
              z.nombre AS zona,
-             collect(DISTINCT c.nombre) AS caracteristicas
-      ORDER BY i.precio ASC
-      LIMIT 50
+             caracteristicas,
+             bonus_semantico
+      ORDER BY bonus_semantico DESC, i.precio ASC
+      LIMIT 100
     `;
+
+    params.ids_sugeridos = params.ids_sugeridos || null;
 
     const result = await neo4jSession.run(query, params);
 
-const propiedades = result.records.map(record => {
-  const precioValue = record.get("precio");
-  const habValue = record.get("habitaciones");
-  const metrosValue = record.get("metros");
-
-  return {
-    id: record.get("id"),
-    precio: typeof precioValue?.toNumber === "function"
-      ? precioValue.toNumber()
-      : precioValue ?? null,
-
-    habitaciones: typeof habValue?.toNumber === "function"
-      ? habValue.toNumber()
-      : habValue ?? null,
-
-    metros: typeof metrosValue?.toNumber === "function"
-      ? metrosValue.toNumber()
-      : metrosValue ?? null,
-
-    tipo_vivienda: record.get("tipo_vivienda"),
-    zona: record.get("zona"),
-    url: record.get("url"),
-    caracteristicas: record.get("caracteristicas")
-  };
-});
+    const propiedades = result.records.map(record => ({
+      id: record.get("id"),
+      precio: record.get("precio")?.toNumber?.() ?? record.get("precio"),
+      habitaciones: record.get("habitaciones")?.toNumber?.() ?? record.get("habitaciones"),
+      metros: record.get("metros")?.toNumber?.() ?? record.get("metros"),
+      tipo_vivienda: record.get("tipo_vivienda"),
+      planta: record.get("planta"),
+      luminosidad: record.get("luminosidad"),
+      exterior_interior: record.get("exterior_interior"),
+      reforma: record.get("reforma"),
+      zona: record.get("zona"),
+      url: record.get("url"),
+      caracteristicas: record.get("caracteristicas"),
+      bonus_semantico: record.get("bonus_semantico")?.toNumber?.() ?? 0
+    }));
 
     console.log(`✅ Encontrados ${propiedades.length} resultados estructurados`);
     return propiedades;
@@ -351,97 +318,120 @@ const propiedades = result.records.map(record => {
     return [];
   }
 }
+
 // ===============================
-// 🔀 FUSIÓN HÍBRIDA
+// 🔀 FUSIÓN HÍBRIDA MEJORADA
 // ===============================
 function fusionarResultados(resultadosSemanticos, resultadosEstructurados, intencion) {
-  console.log("\n🔀 Fusionando resultados...")
+  console.log("\n🔀 Fusionando resultados...");
   
-  // Crear mapa de resultados semánticos por ID
-  const mapaSematico = {}
+  // Crear mapa de similitud semántica
+  const mapaSematico = {};
   resultadosSemanticos.forEach(r => {
-    mapaSematico[r.id] = r.similarity
-  })
+    mapaSematico[r.id] = r.similarity;
+  });
   
-  // Puntuar resultados estructurados
+  // Puntuar resultados
   const resultadosFusion = resultadosEstructurados.map(inmueble => {
-    let score = 0
+    let score = 0;
     
-    // Score por similitud semántica (si está en resultados semánticos)
+    // 1. Score semántico (40% peso)
     if (mapaSematico[inmueble.id]) {
-      score += mapaSematico[inmueble.id] * 0.6 // 60% peso semántico
+      score += mapaSematico[inmueble.id] * 0.4;
+    } else {
+      // Penalización leve si no está en resultados semánticos
+      score -= 10;
     }
     
-    // Score por características obligatorias cumplidas
-    if (intencion.caracteristicas_obligatorias) {
+    // 2. Bonus si ya tiene bonus_semantico de Neo4j (20%)
+    score += inmueble.bonus_semantico * 0.2;
+    
+    // 3. Score por características (20%)
+    if (intencion.caracteristicas_obligatorias?.length > 0) {
       const caracsCumplidas = intencion.caracteristicas_obligatorias.filter(
         c => inmueble.caracteristicas.includes(c)
-      ).length
-      score += (caracsCumplidas / intencion.caracteristicas_obligatorias.length) * 20
+      ).length;
+      score += (caracsCumplidas / intencion.caracteristicas_obligatorias.length) * 20;
     }
     
-    // Score por características deseadas
-    if (intencion.caracteristicas_deseadas) {
-      const caracsDeseadas = intencion.caracteristicas_deseadas.filter(
-        c => inmueble.caracteristicas.includes(c)
-      ).length
-      score += caracsDeseadas * 5
+    // 4. Bonus por atributos descriptivos en descripcion_semantica (20%)
+    if (intencion.descripcion_semantica) {
+      const desc = intencion.descripcion_semantica.toLowerCase();
+      
+      // Luminoso
+      if (desc.includes('luminoso') && inmueble.luminosidad?.toLowerCase().includes('luminoso')) {
+        score += 15;
+      }
+      
+      // Exterior/Interior
+      if (desc.includes('exterior') && inmueble.exterior_interior === 'exterior') {
+        score += 15;
+      }
+      
+      // Planta baja
+      if (desc.includes('planta baja') && inmueble.planta?.toLowerCase().includes('bajo')) {
+        score += 15;
+      }
+      
+      // Reformado
+      if (desc.includes('reformado') && inmueble.reforma?.toLowerCase().includes('reformado')) {
+        score += 15;
+      }
     }
     
-    // Penalización por precio alto (si hay límite)
+    // 5. Penalización por precio (si hay límite)
     if (intencion.precio_maximo && inmueble.precio) {
-      const ratioPrice = inmueble.precio / intencion.precio_maximo
-      score -= ratioPrice * 10
+      const ratioPrice = inmueble.precio / intencion.precio_maximo;
+      score -= ratioPrice * 5;
     }
     
-    return { ...inmueble, score }
-  })
+    return { ...inmueble, score };
+  });
   
   // Ordenar por score
-  resultadosFusion.sort((a, b) => b.score - a.score)
+  resultadosFusion.sort((a, b) => b.score - a.score);
   
-  console.log(`✅ Fusión completada: ${resultadosFusion.length} resultados rankeados`)
-  return resultadosFusion
+  console.log(`✅ Fusión completada: ${resultadosFusion.length} resultados rankeados`);
+  return resultadosFusion;
 }
 
 // ===============================
-// 🤖 GENERAR RESPUESTA CON OPENAI
+// 🤖 GENERAR RESPUESTA
 // ===============================
 async function generarRespuesta(consultaUsuario, intencion, resultados) {
-  console.log("\n🤖 Generando respuesta con OpenAI...")
+  console.log("\n🤖 Generando respuesta con OpenAI...");
   
-  // Preparar resumen de resultados
   const resumenResultados = resultados.slice(0, 10).map((r, idx) => {
-    const caracteristicas = r.caracteristicas.slice(0, 5).join(', ')
+    const caracteristicas = r.caracteristicas.slice(0, 5).join(', ');
+    const extras = [];
+    if (r.planta) extras.push(`Planta: ${r.planta}`);
+    if (r.luminosidad) extras.push(r.luminosidad);
+    if (r.exterior_interior) extras.push(r.exterior_interior);
+    if (r.reforma) extras.push(r.reforma);
+    
     return `${idx + 1}. ${r.tipo_vivienda || 'Inmueble'} en ${r.zona || 'zona desconocida'}
    - Precio: ${r.precio}€/mes
    - ${r.habitaciones} habitaciones, ${r.metros}m²
    - Características: ${caracteristicas || 'sin especificar'}
-   - Score de relevancia: ${r.score.toFixed(1)}
-   - URL: ${r.url || 'No disponible'}`
-  }).join('\n\n')
+   ${extras.length > 0 ? `   - Detalles: ${extras.join(', ')}` : ''}
+   - Score: ${r.score.toFixed(1)}
+   - URL: ${r.url || 'No disponible'}`;
+  }).join('\n\n');
   
   const prompt = `Eres un asistente inmobiliario experto. El usuario preguntó:
 "${consultaUsuario}"
 
-Análisis de la consulta:
+Análisis:
 - Precio máximo: ${intencion.precio_maximo || 'sin límite'}€
 - Habitaciones: ${intencion.habitaciones_minimas || 'sin mínimo'}+
-- Características obligatorias: ${intencion.caracteristicas_obligatorias?.join(', ') || 'ninguna'}
-- Búsqueda semántica: "${intencion.descripcion_semantica}"
+- Características: ${intencion.caracteristicas_obligatorias?.join(', ') || 'ninguna'}
+- Aspectos semánticos: "${intencion.descripcion_semantica}"
 
-Resultados encontrados (${resultados.length} en total, mostrando top 10):
+Resultados (${resultados.length} total, top 10):
 
 ${resumenResultados}
 
-Genera una respuesta natural y útil que:
-1. Resuma los mejores resultados encontrados
-2. Destaque las opciones más relevantes (2-3 inmuebles)
-3. Explique por qué son buenas opciones
-4. Ofrezca alternativas si es necesario
-5. Sea conversacional y amigable
-
-No inventes datos. Usa solo la información proporcionada.`
+Genera respuesta natural destacando 2-3 mejores opciones y explicando por qué son buenas.`;
 
   try {
     const response = await openai.chat.completions.create({
@@ -449,99 +439,63 @@ No inventes datos. Usa solo la información proporcionada.`
       messages: [{ role: "user", content: prompt }],
       temperature: 0.7,
       max_tokens: 800
-    })
+    });
     
-    return response.choices[0].message.content
+    return response.choices[0].message.content;
   } catch (error) {
-    console.error("❌ Error generando respuesta:", error.message)
-    return "Lo siento, no pude generar una respuesta. Aquí están los resultados encontrados."
+    console.error("❌ Error generando respuesta:", error.message);
+    return "Resultados encontrados.";
   }
 }
-
-// ===============================
-// 🚀 PROCESAR CONSULTA
-// ===============================
-async function procesarConsulta(consultaUsuario) {
-  console.log("\n" + "=".repeat(70))
-  console.log(`📝 Consulta: "${consultaUsuario}"`)
-  console.log("=".repeat(70))
-  
-  // 1. Analizar intención
-  const intencion = await analizarIntencion(consultaUsuario)
-  if (!intencion) {
-    console.log("❌ No pude entender tu consulta. Intenta reformularla.")
-    return
-  }
-  
-  console.log("\n📊 Intención detectada:")
-  console.log(`   • Precio máximo: ${intencion.precio_maximo || 'sin límite'}`)
-  console.log(`   • Habitaciones: ${intencion.habitaciones_minimas || 'sin mínimo'}+`)
-  console.log(`   • Características: ${intencion.caracteristicas_obligatorias?.join(', ') || 'ninguna'}`)
-  console.log(`   • Búsqueda semántica: "${intencion.descripcion_semantica}"`)
-  
-  // 2. Búsqueda semántica
-  const resultadosSemanticos = await busquedaSemantica(intencion)
-  
-  // 3. Filtrado estructurado (usando IDs semánticos como punto de partida)
-  const idsSemanticos = resultadosSemanticos.map(r => r.id)
-  const resultadosEstructurados = await filtradoEstructurado(intencion, idsSemanticos)
-  
-  if (resultadosEstructurados.length === 0) {
-    console.log("\n❌ No se encontraron inmuebles que cumplan los criterios.")
-    console.log("💡 Intenta ajustar tus filtros (precio, habitaciones, características)")
-    return
-  }
-  
-  // 4. Fusión híbrida
-  const resultadosFinales = fusionarResultados(resultadosSemanticos, resultadosEstructurados, intencion)
-  
-  // 5. Generar respuesta
-  const respuesta = await generarRespuesta(consultaUsuario, intencion, resultadosFinales)
-  
-  console.log("\n" + "=".repeat(70))
-  console.log("🤖 RESPUESTA DEL ASISTENTE")
-  console.log("=".repeat(70))
-  console.log(respuesta)
-  console.log("\n" + "=".repeat(70))
-}
-
 
 // ===============================
 // 🔌 CERRAR CONEXIONES
 // ===============================
 async function cerrarConexiones() {
-  if (neo4jSession) await neo4jSession.close()
-  if (neo4jDriver) await neo4jDriver.close()
+  if (neo4jSession) await neo4jSession.close();
+  if (neo4jDriver) await neo4jDriver.close();
 }
 
+// ===============================
+// 🚀 FUNCIÓN PRINCIPAL EXPORTADA
+// ===============================
 async function buscarInmueblesHibrido(consultaUsuario) {
   await initConnections();
 
   const intencion = await analizarIntencion(consultaUsuario);
+  
   console.log("\n📊 Intención detectada:");
-console.log("   • Precio máximo:", intencion.precio_maximo);
-console.log("   • Habitaciones mínimas:", intencion.habitaciones_minimas);
-console.log("   • Características obligatorias:", intencion.caracteristicas_obligatorias);
-console.log("   • Zonas preferidas:", intencion.zonas_preferidas);
-console.log("   • Descripción semántica:", intencion.descripcion_semantica);
+  console.log("   • Precio máximo:", intencion.precio_maximo);
+  console.log("   • Habitaciones mínimas:", intencion.habitaciones_minimas);
+  console.log("   • Características obligatorias:", intencion.caracteristicas_obligatorias);
+  console.log("   • Zonas preferidas:", intencion.zonas_preferidas);
+  console.log("   • Descripción semántica:", intencion.descripcion_semantica);
 
   if (!intencion) {
     return { error: true, mensaje: "No pude interpretar la consulta." };
   }
 
+  // 1. Búsqueda semántica (amplia)
   const resultadosSemanticos = await busquedaSemantica(intencion);
   const ids = resultadosSemanticos.map(r => r.id);
 
+  // 2. Filtrado estructurado (flexible)
   const resultadosEstructurados = await filtradoEstructurado(intencion, ids);
 
   if (resultadosEstructurados.length === 0) {
-    return { resultados: [], mensaje: "No encontré inmuebles con esos criterios." };
+    return { 
+      resultados: [], 
+      mensaje: "No encontré inmuebles con esos criterios. Intenta ser menos específico." 
+    };
   }
 
+  // 3. Fusión inteligente
   const fusionados = fusionarResultados(resultadosSemanticos, resultadosEstructurados, intencion);
+  
+  // 4. Explicación
   const explicacion = await generarRespuesta(consultaUsuario, intencion, fusionados);
 
   return { resultados: fusionados, explicacion };
 }
 
-export { buscarInmueblesHibrido };
+export { buscarInmueblesHibrido, cerrarConexiones };

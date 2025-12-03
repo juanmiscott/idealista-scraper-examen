@@ -25,6 +25,64 @@ const driver = neo4j.driver(
 const session = driver.session({ database: NEO4J_DB });
 
 // ================================
+// FUNCIÓN AUXILIAR: EXTRAER PLANTA
+// ================================
+function extractPlanta(prop) {
+  const extras = prop.extras || "";
+  const match = extras.match(/Planta\s+(\d+)ª|planta\s+(\w+)/i);
+  if (match) return match[1] || match[2];
+  
+  const carac = prop.caracteristicas_detalle || [];
+  for (const c of carac) {
+    const m = c.match(/Planta\s+(\d+)ª|planta\s+(\w+)/i);
+    if (m) return m[1] || m[2];
+  }
+  
+  return null;
+}
+
+// ================================
+// FUNCIÓN AUXILIAR: LUMINOSIDAD
+// ================================
+function extractLuminosidad(prop) {
+  const texto = [
+    prop.titulo_completo,
+    prop.descripcion_detallada,
+    prop.extras,
+    ...(prop.caracteristicas_detalle || [])
+  ].join(" ").toLowerCase();
+  
+  if (texto.includes("muy luminoso") || texto.includes("mucha luz")) {
+    return "muy luminoso";
+  }
+  if (texto.includes("luminoso") || texto.includes("luz natural")) {
+    return "luminoso";
+  }
+  if (texto.includes("exterior")) {
+    return "luminoso";
+  }
+  
+  return null;
+}
+
+// ================================
+// FUNCIÓN AUXILIAR: EXTERIOR/INTERIOR
+// ================================
+function extractExteriorInterior(prop) {
+  const extras = (prop.extras || "").toLowerCase();
+  const carac = (prop.caracteristicas_detalle || []).join(" ").toLowerCase();
+  
+  if (extras.includes("exterior") || carac.includes("exterior")) {
+    return "exterior";
+  }
+  if (extras.includes("interior") || carac.includes("interior")) {
+    return "interior";
+  }
+  
+  return null;
+}
+
+// ================================
 // FUNCIÓN PRINCIPAL
 // ================================
 async function main() {
@@ -40,6 +98,8 @@ async function main() {
 
   console.log(`📥 Cargando ${propiedades.length} propiedades en Neo4j...`);
 
+  let procesadas = 0;
+
   for (const prop of propiedades) {
     const id = prop.url?.match(/inmueble\/(\d+)/)?.[1];
     if (!id) continue;
@@ -51,17 +111,37 @@ async function main() {
     const habitaciones = prop.habitaciones || 0;
     const metros = prop.metros || 0;
     const url = prop.url;
+    
+    // Extraer atributos adicionales
+    const planta = extractPlanta(prop);
+    const luminosidad = extractLuminosidad(prop);
+    const exterior_interior = extractExteriorInterior(prop);
+    const certificado_energetico = prop.energetico || null;
 
-    // Crear inmueble
+    // Crear inmueble con TODOS los atributos
     await session.run(
       `
       MERGE (i:Inmueble {id: $id})
       SET i.precio = $precio,
           i.habitaciones = $habitaciones,
           i.metros = $metros,
-          i.url = $url
+          i.url = $url,
+          i.planta = $planta,
+          i.luminosidad = $luminosidad,
+          i.exterior_interior = $exterior_interior,
+          i.certificado_energetico = $certificado_energetico
       `,
-      { id, precio, habitaciones, metros, url }
+      { 
+        id, 
+        precio: neo4j.int(precio), 
+        habitaciones: neo4j.int(habitaciones), 
+        metros: neo4j.int(metros), 
+        url,
+        planta,
+        luminosidad,
+        exterior_interior,
+        certificado_energetico
+      }
     );
 
     // Crear zona
@@ -75,18 +155,38 @@ async function main() {
       );
     }
 
-    // Crear característica: ascensor / terraza / balcón / garaje
-    const caracteristicas = [];
+    // Extraer características (mejorado)
+    const caracteristicas = new Set();
 
-    if (prop.extras?.toLowerCase().includes("ascensor")) caracteristicas.push("ascensor");
-    if (prop.extras?.toLowerCase().includes("terraza")) caracteristicas.push("terraza");
-    if (prop.extras?.toLowerCase().includes("balcón")) caracteristicas.push("balcon");
-    if (prop.caracteristicas_detalle) {
-      if (prop.caracteristicas_detalle.some(t => t.toLowerCase().includes("garaje"))) {
-        caracteristicas.push("garaje");
-      }
+    const textoCompleto = [
+      prop.extras || "",
+      prop.titulo_completo || "",
+      ...(prop.caracteristicas_detalle || [])
+    ].join(" ").toLowerCase();
+
+    // Características comunes
+    if (textoCompleto.includes("ascensor")) caracteristicas.add("ascensor");
+    if (textoCompleto.includes("terraza")) caracteristicas.add("terraza");
+    if (textoCompleto.includes("balcón") || textoCompleto.includes("balcon")) {
+      caracteristicas.add("balcon");
+    }
+    if (textoCompleto.includes("garaje") || textoCompleto.includes("parking")) {
+      caracteristicas.add("garaje");
+    }
+    if (textoCompleto.includes("piscina")) caracteristicas.add("piscina");
+    if (textoCompleto.includes("aire acondicionado")) {
+      caracteristicas.add("aire_acondicionado");
+    }
+    if (textoCompleto.includes("calefacción") || textoCompleto.includes("calefaccion")) {
+      caracteristicas.add("calefaccion");
+    }
+    if (textoCompleto.includes("amueblado")) caracteristicas.add("amueblado");
+    if (textoCompleto.includes("trastero")) caracteristicas.add("trastero");
+    if (textoCompleto.includes("armarios empotrados")) {
+      caracteristicas.add("armarios_empotrados");
     }
 
+    // Crear nodos de características
     for (const c of caracteristicas) {
       await session.run(
         `
@@ -96,9 +196,44 @@ async function main() {
         { id, c }
       );
     }
+
+    procesadas++;
+    if (procesadas % 10 === 0) {
+      process.stdout.write(`\r  ⏳ Procesadas: ${procesadas}/${propiedades.length}`);
+    }
   }
 
-  console.log("🎉 Neo4j cargado correctamente.");
+  console.log(`\n✅ ${procesadas} propiedades cargadas en Neo4j.`);
+
+  // Estadísticas
+  const stats = await session.run(`
+    MATCH (i:Inmueble)
+    OPTIONAL MATCH (i)-[:TIENE]->(c:Caracteristica)
+    OPTIONAL MATCH (i)-[:UBICADO_EN]->(z:Zona)
+    RETURN count(DISTINCT i) as inmuebles,
+           count(DISTINCT z) as zonas,
+           count(DISTINCT c) as caracteristicas
+  `);
+
+  const record = stats.records[0];
+  console.log("\n📊 ESTADÍSTICAS:");
+  console.log(`   🏠 Inmuebles: ${record.get('inmuebles').toNumber()}`);
+  console.log(`   📍 Zonas: ${record.get('zonas').toNumber()}`);
+  console.log(`   🏷️ Características: ${record.get('caracteristicas').toNumber()}`);
+
+  // Top características
+  const topCarac = await session.run(`
+    MATCH (i:Inmueble)-[:TIENE]->(c:Caracteristica)
+    RETURN c.nombre as caracteristica, count(i) as cantidad
+    ORDER BY cantidad DESC
+    LIMIT 5
+  `);
+
+  console.log("\n🔝 TOP 5 CARACTERÍSTICAS:");
+  topCarac.records.forEach((r, idx) => {
+    console.log(`   ${idx + 1}. ${r.get('caracteristica')}: ${r.get('cantidad').toNumber()}`);
+  });
+
   await session.close();
   await driver.close();
 }
