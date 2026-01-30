@@ -7,7 +7,7 @@ dotenv.config();
 // ================================
 // CONFIG
 // ================================
-const INPUT_FILE = "./bbdd/Todas_propiedades.json";
+const INPUT_FILE = "./bbdd/Propiedades_normalizadas.json";
 
 const NEO4J_URI = process.env.NEO4J_URI || "neo4j://localhost:7687";
 const NEO4J_USER = process.env.NEO4J_USER || "neo4j";
@@ -25,64 +25,6 @@ const driver = neo4j.driver(
 const session = driver.session({ database: NEO4J_DB });
 
 // ================================
-// FUNCIÓN AUXILIAR: EXTRAER PLANTA
-// ================================
-function extractPlanta(prop) {
-  const extras = prop.extras || "";
-  const match = extras.match(/Planta\s+(\d+)ª|planta\s+(\w+)/i);
-  if (match) return match[1] || match[2];
-  
-  const carac = prop.caracteristicas_detalle || [];
-  for (const c of carac) {
-    const m = c.match(/Planta\s+(\d+)ª|planta\s+(\w+)/i);
-    if (m) return m[1] || m[2];
-  }
-  
-  return null;
-}
-
-// ================================
-// FUNCIÓN AUXILIAR: LUMINOSIDAD
-// ================================
-function extractLuminosidad(prop) {
-  const texto = [
-    prop.titulo_completo,
-    prop.descripcion_detallada,
-    prop.extras,
-    ...(prop.caracteristicas_detalle || [])
-  ].join(" ").toLowerCase();
-  
-  if (texto.includes("muy luminoso") || texto.includes("mucha luz")) {
-    return "muy luminoso";
-  }
-  if (texto.includes("luminoso") || texto.includes("luz natural")) {
-    return "luminoso";
-  }
-  if (texto.includes("exterior")) {
-    return "luminoso";
-  }
-  
-  return null;
-}
-
-// ================================
-// FUNCIÓN AUXILIAR: EXTERIOR/INTERIOR
-// ================================
-function extractExteriorInterior(prop) {
-  const extras = (prop.extras || "").toLowerCase();
-  const carac = (prop.caracteristicas_detalle || []).join(" ").toLowerCase();
-  
-  if (extras.includes("exterior") || carac.includes("exterior")) {
-    return "exterior";
-  }
-  if (extras.includes("interior") || carac.includes("interior")) {
-    return "interior";
-  }
-  
-  return null;
-}
-
-// ================================
 // FUNCIÓN PRINCIPAL
 // ================================
 async function main() {
@@ -96,29 +38,31 @@ async function main() {
 
   const propiedades = JSON.parse(fs.readFileSync(INPUT_FILE, "utf-8"));
 
-  console.log(`📥 Cargando ${propiedades.length} propiedades en Neo4j...`);
+  console.log(`📥 Cargando ${propiedades.length} propiedades en Neo4j...\n`);
 
   let procesadas = 0;
 
   for (const prop of propiedades) {
-    const id = prop.url?.match(/inmueble\/(\d+)/)?.[1];
+    const id = prop.id;
     if (!id) continue;
 
-    const barrio = prop.barrio || null;
-    const ciudad = prop.ciudad || null;
+    const precio = prop.precio ?? 0;
+    const habitaciones = prop.habitaciones ?? 0;
+    const metros = prop.metros ?? 0;
+    const url = prop.url ?? null;
 
-    const precio = prop.price_num || 0;
-    const habitaciones = prop.habitaciones || 0;
-    const metros = prop.metros || 0;
-    const url = prop.url;
-    
-    // Extraer atributos adicionales
-    const planta = extractPlanta(prop);
-    const luminosidad = extractLuminosidad(prop);
-    const exterior_interior = extractExteriorInterior(prop);
-    const certificado_energetico = prop.energetico || null;
+    // ================================
+    // ⚠️ LOS VALORES CORRECTOS ESTÁN EN prop.atributos
+    // ================================
+    const atr = prop.atributos;
 
-    // Crear inmueble con TODOS los atributos
+    const planta = atr.planta ?? null;
+    const luminosidad = atr.luminosidad ?? null;
+    const exterior_interior = atr.exterior_interior ?? null;
+    const certificado_energetico = atr.certificado_energetico ?? null;
+    const tipo_vivienda = atr.tipo_vivienda ?? null;
+
+    // Crear inmueble con TODOS los atributos normalizados
     await session.run(
       `
       MERGE (i:Inmueble {id: $id})
@@ -129,81 +73,62 @@ async function main() {
           i.planta = $planta,
           i.luminosidad = $luminosidad,
           i.exterior_interior = $exterior_interior,
-          i.certificado_energetico = $certificado_energetico
+          i.certificado_energetico = $certificado_energetico,
+          i.tipo_vivienda = $tipo_vivienda
       `,
-      { 
-        id, 
-        precio: neo4j.int(precio), 
-        habitaciones: neo4j.int(habitaciones), 
-        metros: neo4j.int(metros), 
+      {
+        id,
+        precio: neo4j.int(precio),
+        habitaciones: neo4j.int(habitaciones),
+        metros: neo4j.int(metros),
         url,
         planta,
         luminosidad,
         exterior_interior,
-        certificado_energetico
+        certificado_energetico,
+        tipo_vivienda
       }
     );
 
-    // Crear zona
-    if (ciudad) {
+    // UBICACIÓN
+    if (prop.ubicacion?.ciudad) {
       await session.run(
         `
-        MERGE (z:Zona {nombre: $ciudad})
+        MERGE (z:Zona {nombre: $zona})
         MERGE (i:Inmueble {id: $id})-[:UBICADO_EN]->(z)
         `,
-        { id, ciudad }
+        { id, zona: prop.ubicacion.ciudad }
       );
     }
 
-    // Extraer características (mejorado)
-    const caracteristicas = new Set();
+    // ================================
+    // CARGAR CARACTERÍSTICAS NORMALES
+    // ================================
+    const caracteristicas = [];
 
-    const textoCompleto = [
-      prop.extras || "",
-      prop.titulo_completo || "",
-      ...(prop.caracteristicas_detalle || [])
-    ].join(" ").toLowerCase();
-
-    // Características comunes
-    if (textoCompleto.includes("ascensor")) caracteristicas.add("ascensor");
-    if (textoCompleto.includes("terraza")) caracteristicas.add("terraza");
-    if (textoCompleto.includes("balcón") || textoCompleto.includes("balcon")) {
-      caracteristicas.add("balcon");
-    }
-    if (textoCompleto.includes("garaje") || textoCompleto.includes("parking")) {
-      caracteristicas.add("garaje");
-    }
-    if (textoCompleto.includes("piscina")) caracteristicas.add("piscina");
-    if (textoCompleto.includes("aire acondicionado")) {
-      caracteristicas.add("aire_acondicionado");
-    }
-    if (textoCompleto.includes("calefacción") || textoCompleto.includes("calefaccion")) {
-      caracteristicas.add("calefaccion");
-    }
-    if (textoCompleto.includes("amueblado")) caracteristicas.add("amueblado");
-    if (textoCompleto.includes("trastero")) caracteristicas.add("trastero");
-    if (textoCompleto.includes("armarios empotrados")) {
-      caracteristicas.add("armarios_empotrados");
+    for (const [key, value] of Object.entries(atr)) {
+      if (value === true) {
+        caracteristicas.push(key);
+      }
     }
 
-    // Crear nodos de características
-    for (const c of caracteristicas) {
+    for (const car of caracteristicas) {
       await session.run(
         `
-        MERGE (car:Caracteristica {nombre: $c})
-        MERGE (i:Inmueble {id: $id})-[:TIENE]->(car)
+        MERGE (c:Caracteristica {nombre: $car})
+        MERGE (i:Inmueble {id: $id})-[:TIENE]->(c)
         `,
-        { id, c }
+        { id, car }
       );
     }
 
     procesadas++;
     if (procesadas % 10 === 0) {
-      process.stdout.write(`\r  ⏳ Procesadas: ${procesadas}/${propiedades.length}`);
+      process.stdout.write(`⏳ Procesadas: ${procesadas}/${propiedades.length} \r`);
     }
   }
 
-  console.log(`\n✅ ${procesadas} propiedades cargadas en Neo4j.`);
+  console.log(`\n\n✅ ${procesadas} propiedades cargadas en Neo4j.`);
 
   // Estadísticas
   const stats = await session.run(`
@@ -220,19 +145,6 @@ async function main() {
   console.log(`   🏠 Inmuebles: ${record.get('inmuebles').toNumber()}`);
   console.log(`   📍 Zonas: ${record.get('zonas').toNumber()}`);
   console.log(`   🏷️ Características: ${record.get('caracteristicas').toNumber()}`);
-
-  // Top características
-  const topCarac = await session.run(`
-    MATCH (i:Inmueble)-[:TIENE]->(c:Caracteristica)
-    RETURN c.nombre as caracteristica, count(i) as cantidad
-    ORDER BY cantidad DESC
-    LIMIT 5
-  `);
-
-  console.log("\n🔝 TOP 5 CARACTERÍSTICAS:");
-  topCarac.records.forEach((r, idx) => {
-    console.log(`   ${idx + 1}. ${r.get('caracteristica')}: ${r.get('cantidad').toNumber()}`);
-  });
 
   await session.close();
   await driver.close();

@@ -30,35 +30,38 @@ class TelegramService {
   }
 
 async search(chatId, query) {
+  try {
+    if (!query || query.trim().length === 0) {
+      await this.sendMessage(chatId, "Escribe algo como:\n/buscar piso con ascensor y luminoso en Palma");
+      return;
+    }
 
-  const resultado = await buscarInmueblesHibrido(query);
+    await this.sendMessage(chatId, "🔎 Buscando pisos que encajen con tu descripción...");
 
-  if (resultado.error) {
-    await this.sendMessage(chatId, "No pude entender tu consulta.");
-    return;
-  }
+    // ESTA ES LA VARIABLE CORRECTA
+    const { resultados, explicacion } = await buscarInmueblesHibrido(query);
 
-  if (!resultado.resultados || resultado.resultados.length === 0) {
-    await this.sendMessage(chatId, "No encontré inmuebles que coincidan.");
-    return;
-  }
+    // Si no hay estructurados, pero sí hay candidatos semánticos
+    if (!resultados || resultados.length === 0) {
+      await this.sendMessage(
+        chatId,
+        "No encontré coincidencias exactas, pero puedo enseñarte opciones similares si amplías un poco tu búsqueda."
+      );
+      return;
+    }
 
-  // Enviar explicación generada por GPT (más natural)
-  await this.sendMessage(chatId, resultado.explicacion);
+    // Enviar explicación generada por IA
+    if (explicacion) {
+      await this.sendMessage(chatId, explicacion);
+    }
 
-  // Enviar 3–5 inmuebles en formato corto
-  const top = resultado.resultados.slice(0, 5);
+    // Enviar top 5 resultados
+    // No enviamos fichas individuales. Solo la respuesta resumida de GPT.
 
-  for (const inm of top) {
-    const mensaje = 
-      `🏠 *${inm.tipo_vivienda || "Inmueble"}*\n` +
-      `📍 Zona: ${inm.zona || "no indicada"}\n` +
-      `💶 Precio: ${inm.precio} €/mes\n` +
-      `📐 ${inm.metros} m² - ${inm.habitaciones} habitaciones\n` +
-      `✨ ${inm.caracteristicas?.slice(0, 5).join(", ") || "sin características"}\n` +
-      (inm.url ? `🔗 [Ver anuncio](${inm.url})` : "");
 
-    await this.sendMessage(chatId, mensaje);
+  } catch (err) {
+    console.error("❌ Error en búsqueda desde Telegram:", err);
+    await this.sendMessage(chatId, "Ha ocurrido un error buscando pisos. Inténtalo de nuevo.");
   }
 }
 

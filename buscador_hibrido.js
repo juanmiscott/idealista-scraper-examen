@@ -124,7 +124,15 @@ async function busquedaSemantica(intencion, limite = 50) {
     // IMPORTANTE: NO usar filtros where aquí, dejar que ChromaDB encuentre lo más similar
     // Los filtros se aplicarán después en Neo4j
     
-    const queryText = intencion.descripcion_semantica || "vivienda";
+    const queryParts = [];
+
+if (intencion.descripcion_semantica) queryParts.push(intencion.descripcion_semantica);
+if (intencion.tipo_vivienda) queryParts.push(intencion.tipo_vivienda);
+if (intencion.zonas_preferidas?.length > 0) queryParts.push(intencion.zonas_preferidas.join(" "));
+if (intencion.caracteristicas_obligatorias?.length > 0) queryParts.push(intencion.caracteristicas_obligatorias.join(" "));
+if (intencion.caracteristicas_deseadas?.length > 0) queryParts.push(intencion.caracteristicas_deseadas.join(" "));
+
+const queryText = queryParts.join(" ").trim() || "vivienda";
     
     const embedding = await openai.embeddings.create({
       model: "text-embedding-3-small",
@@ -225,17 +233,23 @@ async function filtradoEstructurado(intencion, idsSemanticos = null) {
       'armarios_empotrados'
     ];
 
-    if (intencion.caracteristicas_obligatorias?.length > 0) {
+    const tieneFiltrosFuertes =
+      intencion.precio_maximo ||
+      intencion.precio_minimo ||
+      intencion.habitaciones_minimas ||
+      intencion.habitaciones_maximas ||
+      intencion.zonas_preferidas?.length > 0;
+
+    if (tieneFiltrosFuertes && intencion.caracteristicas_obligatorias?.length > 0) {
       for (const carac of intencion.caracteristicas_obligatorias) {
-        // Solo aplicar si la característica existe en Neo4j
-        if (caracteristicasValidas.includes(carac.toLowerCase())) {
-          conditions.push(`
-            EXISTS {
+        conditions.push(`
+          EXISTS {
               MATCH (i)-[:TIENE]->(:Caracteristica {nombre: '${carac}'})
-            }
-          `);
-        }
+          }
+        `);
       }
+    } else {
+      console.log("⚠️ Características ignoradas porque solo se mencionan cosas sueltas.");
     }
 
     // -------------------------------
@@ -400,51 +414,45 @@ function fusionarResultados(resultadosSemanticos, resultadosEstructurados, inten
 // ===============================
 async function generarRespuesta(consultaUsuario, intencion, resultados) {
   console.log("\n🤖 Generando respuesta con OpenAI...");
-  
-  const resumenResultados = resultados.slice(0, 10).map((r, idx) => {
-    const caracteristicas = r.caracteristicas.slice(0, 5).join(', ');
-    const extras = [];
-    if (r.planta) extras.push(`Planta: ${r.planta}`);
-    if (r.luminosidad) extras.push(r.luminosidad);
-    if (r.exterior_interior) extras.push(r.exterior_interior);
-    if (r.reforma) extras.push(r.reforma);
-    
-    return `${idx + 1}. ${r.tipo_vivienda || 'Inmueble'} en ${r.zona || 'zona desconocida'}
-   - Precio: ${r.precio}€/mes
-   - ${r.habitaciones} habitaciones, ${r.metros}m²
-   - Características: ${caracteristicas || 'sin especificar'}
-   ${extras.length > 0 ? `   - Detalles: ${extras.join(', ')}` : ''}
-   - Score: ${r.score.toFixed(1)}
-   - URL: ${r.url || 'No disponible'}`;
-  }).join('\n\n');
-  
-  const prompt = `Eres un asistente inmobiliario experto. El usuario preguntó:
-"${consultaUsuario}"
 
-Análisis:
-- Precio máximo: ${intencion.precio_maximo || 'sin límite'}€
-- Habitaciones: ${intencion.habitaciones_minimas || 'sin mínimo'}+
-- Características: ${intencion.caracteristicas_obligatorias?.join(', ') || 'ninguna'}
-- Aspectos semánticos: "${intencion.descripcion_semantica}"
+  // Tomamos solo los 3 mejores
+  const top = resultados.slice(0, 3);
 
-Resultados (${resultados.length} total, top 10):
+  const resumen = top.map((r, i) => `
+${i + 1}. ${r.tipo_vivienda || "Inmueble"} en ${r.zona || "zona desconocida"}
+- Precio: ${r.precio}€
+- ${r.habitaciones} hab · ${r.metros} m² · Planta ${r.planta || "-"}
+- Características: ${(r.caracteristicas || []).slice(0, 3).join(", ") || "no especificadas"}
+- Descripción breve: ${r.luminosidad || ""} ${r.exterior_interior || ""} ${r.reforma || ""}
+- Enlace: ${r.url}
+`).join("\n");
 
-${resumenResultados}
+  const prompt = `
+El usuario pidió: "${consultaUsuario}"
 
-Genera respuesta natural destacando 2-3 mejores opciones y explicando por qué son buenas.`;
+Resume los 3 mejores inmuebles encontrados con un formato muy corto, claro y directo.
+No añadas texto adicional ni explicaciones largas.
+Solo devuelve:
+
+• Título general
+• 3 pisos en formato lista (ya preparado):
+${resumen}
+
+Haz que la respuesta sea breve y profesional.
+`;
 
   try {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.7,
-      max_tokens: 800
+      temperature: 0.4,
+      max_tokens: 300
     });
-    
-    return response.choices[0].message.content;
+
+    return response.choices[0].message.content.trim();
   } catch (error) {
     console.error("❌ Error generando respuesta:", error.message);
-    return "Resultados encontrados.";
+    return "Aquí tienes los resultados más relevantes.";
   }
 }
 
